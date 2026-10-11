@@ -275,3 +275,15 @@ body {
     opacity: 1;
   }
 }
+
+/* Low Power Mode: stop the idle orb/ring infinite animations.
+   The recording waveform stays live because it mirrors real audio data. */
+body.low-power .overlay-pill.recording .status-orb,
+body.low-power .overlay-pill.recording .orb-ring,
+body.low-power .overlay-pill.transcribing .orb-ring {
+  animation: none;
+}
+
+body.low-power .ring-2 {
+  animation-delay: 0s;
+}

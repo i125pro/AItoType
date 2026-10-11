@@ -146,7 +146,17 @@ function setStatus(status) {
   updateSubtext();
 }
 
+async function syncLowPowerMode() {
+  try {
+    const config = await invoke('get_stt_config');
+    const on = !!(config && config.low_power_mode);
+    document.body.classList.toggle('low-power', on);
+  } catch (_) { }
+}
+
 async function init() {
+  await syncLowPowerMode();
+
   await listen('overlay-status', (event) => {
     const status = String(event?.payload?.status || 'recording').trim().toLowerCase();
     setStatus(status);

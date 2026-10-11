@@ -19,6 +19,23 @@
 
   --mouse-x: 50%;
   --mouse-y: 50%;
+
+  /* GPU cost knobs for the aurora beams (overridable by body.low-power) */
+  --beam-blur: 80px;
+  --beam-float-dur: 20s;
+}
+
+/* Low power mode: collapse blur + motion so the GPU can idle. */
+body.low-power {
+  --beam-blur: 0px;
+  --beam-float-dur: 0s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --beam-blur: 0px;
+    --beam-float-dur: 0s;
+  }
 }
 
 body {
@@ -52,10 +69,12 @@ body {
 
 .aurora-beam {
   position: absolute;
-  filter: blur(80px);
+  filter: blur(var(--beam-blur));
   opacity: 0.4;
   mix-blend-mode: screen;
-  animation: float 20s infinite ease-in-out alternate;
+  animation: float var(--beam-float-dur) infinite ease-in-out alternate;
+  will-change: transform;
+  transform: translateZ(0);
 }
 
 .beam-1 {
@@ -233,6 +252,8 @@ body {
   position: relative;
   /* Levitating animation */
   animation: levitate 6s infinite ease-in-out;
+  will-change: transform;
+  transform: translateZ(0);
 }
 
 @keyframes levitate {

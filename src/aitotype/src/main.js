@@ -142,6 +142,9 @@ const el = {
   // Recording Mode
   recordModeSwitch: document.getElementById('record-mode-switch'),
 
+  // Low Power Mode (GPU)
+  lowPowerSwitch: document.getElementById('low-power-switch'),
+
   // History
   historyContainer: document.getElementById('history-container')
 };
@@ -1168,6 +1171,14 @@ function onEnhancementProviderChange() {
   }
 }
 
+function applyLowPowerMode(enabled) {
+  const on = !!enabled;
+  document.body.classList.toggle('low-power', on);
+  try {
+    localStorage.setItem('aitotype_low_power', on ? '1' : '0');
+  } catch (e) { }
+}
+
 function buildSttConfigFromUi() {
   cacheCurrentProviderApiKey();
   cacheCurrentEnhancementApiKey();
@@ -1187,6 +1198,7 @@ function buildSttConfigFromUi() {
     base_url: '',
     auto_write: el.autoWriteSwitch ? el.autoWriteSwitch.checked : false,
     record_mode: state.recordMode || 'toggle',
+    low_power_mode: el.lowPowerSwitch ? el.lowPowerSwitch.checked : false,
     enhancement_enabled: el.enhancementSwitch ? el.enhancementSwitch.checked : false,
     enhancement_provider: enhancementProvider,
     enhancement_base_url: '',
@@ -1319,6 +1331,10 @@ async function loadConfig() {
     if (el.recordModeSwitch) {
       el.recordModeSwitch.checked = recordMode === 'hold';
     }
+    if (el.lowPowerSwitch) {
+      el.lowPowerSwitch.checked = !!config.low_power_mode;
+    }
+    applyLowPowerMode(!!config.low_power_mode);
     updateInstructionText();
   } catch (e) { }
 
@@ -1801,6 +1817,17 @@ async function init() {
         await syncConfigFromUi();
       } catch (e) {
         console.error('Sync record mode failed', e);
+      }
+    });
+  }
+
+  if (el.lowPowerSwitch) {
+    el.lowPowerSwitch.addEventListener('change', async () => {
+      applyLowPowerMode(el.lowPowerSwitch.checked);
+      try {
+        await syncConfigFromUi();
+      } catch (e) {
+        console.error('Sync low power mode failed', e);
       }
     });
   }

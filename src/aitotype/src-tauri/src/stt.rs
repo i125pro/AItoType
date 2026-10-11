@@ -126,6 +126,9 @@ pub struct SttConfig {
     /// 润色 Prompt 模板（支持 {text} 占位）
     #[serde(default = "default_enhancement_prompt")]
     pub enhancement_prompt: String,
+    /// 低功耗模式：关闭 GPU 光斑模糊与无限动画，降低空闲 CPU/GPU 占用
+    #[serde(default)]
+    pub low_power_mode: bool,
 }
 
 impl Default for SttConfig {
@@ -143,6 +146,7 @@ impl Default for SttConfig {
             enhancement_api_key: String::new(),
             enhancement_model: default_enhancement_model(),
             enhancement_prompt: default_enhancement_prompt(),
+            low_power_mode: false,
         }
     }
 }
