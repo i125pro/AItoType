@@ -275,3 +275,20 @@ body {
     opacity: 1;
   }
 }
+
+/* ============ GPU Low Power Mode ============
+   低功耗模式下停掉光球/光环的无限循环动画（GPU 合成开销），
+   录音波形由真实音频电平驱动，属于有效反馈，保持不变。 */
+body.low-power .overlay-pill.recording .status-orb,
+body.low-power .overlay-pill.recording .orb-ring,
+body.low-power .overlay-pill.transcribing .orb-ring {
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .overlay-pill.recording .status-orb,
+  .overlay-pill.recording .orb-ring,
+  .overlay-pill.transcribing .orb-ring {
+    animation: none;
+  }
+}

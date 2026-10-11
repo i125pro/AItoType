@@ -146,6 +146,15 @@ function setStatus(status) {
   updateSubtext();
 }
 
+async function syncLowPowerFromConfig() {
+  try {
+    const config = await invoke('get_stt_config');
+    document.body.classList.toggle('low-power', !!(config && config.low_power_mode));
+  } catch (_) {
+    // 后端不可用时保持默认（高性能）模式
+  }
+}
+
 async function init() {
   await listen('overlay-status', (event) => {
     const status = String(event?.payload?.status || 'recording').trim().toLowerCase();
@@ -154,6 +163,7 @@ async function init() {
 
   setStatus('recording');
   queryAndShowDevice();
+  syncLowPowerFromConfig();
 }
 
 init();

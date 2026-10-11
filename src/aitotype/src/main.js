@@ -47,6 +47,7 @@ const state = {
   enhancementFallbackHintTimer: null,
   correctionToastTimer: null,
   recordMode: 'toggle',
+  lowPowerMode: false,
   updateBannerDismissed: false,
   updateInfo: null,
   providerApiKeys: {
@@ -141,6 +142,9 @@ const el = {
 
   // Recording Mode
   recordModeSwitch: document.getElementById('record-mode-switch'),
+
+  // GPU Low Power Mode
+  lowPowerSwitch: document.getElementById('low-power-switch'),
 
   // History
   historyContainer: document.getElementById('history-container')
@@ -1171,6 +1175,7 @@ function onEnhancementProviderChange() {
 function buildSttConfigFromUi() {
   cacheCurrentProviderApiKey();
   cacheCurrentEnhancementApiKey();
+
   const provider = normalizeProvider(el.providerSelect?.value || state.currentProvider);
   const enhancementProvider = normalizeProvider(el.enhancementProviderSelect?.value || state.enhancementProvider);
   const apiKey = state.providerApiKeys[provider] || '';
@@ -1192,8 +1197,31 @@ function buildSttConfigFromUi() {
     enhancement_base_url: '',
     enhancement_api_key: enhancementApiKey,
     enhancement_model: enhancementModel,
-    enhancement_prompt: enhancementPrompt
+    enhancement_prompt: enhancementPrompt,
+    low_power_mode: el.lowPowerSwitch ? !!el.lowPowerSwitch.checked : !!state.lowPowerMode
   };
+}
+
+// ============ GPU Low Power Mode ============
+// 背景光斑的 blur(80px) + mix-blend-mode: screen + 无限漂移动画会让 WebView2 的
+// gpu-process 空闲时持续满负荷重算合成树。开启低功耗后：模糊半径降为 0、动画停止，
+// 只保留静态径向渐变（自带 alpha 衰减，肉眼几乎无差别）。
+function applyLowPowerMode(enabled) {
+  const on = !!enabled;
+  state.lowPowerMode = on;
+  document.body.classList.toggle('low-power', on);
+  if (el.lowPowerSwitch && el.lowPowerSwitch.checked !== on) {
+    el.lowPowerSwitch.checked = on;
+  }
+  localStorage.setItem('aitotype_low_power_mode', on ? 'true' : 'false');
+}
+
+async function syncLowPowerToOverlay() {
+  try {
+    await invokeWithTimeout('set_overlay_low_power', { enabled: !!state.lowPowerMode }, 500);
+  } catch (e) {
+    // overlay 窗口尚未创建/不可用时忽略，overlay.js 启动时会自行读取配置兜底
+  }
 }
 
 function formatProviderName(provider) {
@@ -1319,6 +1347,14 @@ async function loadConfig() {
     if (el.recordModeSwitch) {
       el.recordModeSwitch.checked = recordMode === 'hold';
     }
+
+    // GPU 低功耗模式：后端配置为唯一真源，localStorage 仅作为后端不可用时的兜底
+    const lowPowerFromConfig = typeof config.low_power_mode === 'boolean'
+      ? config.low_power_mode
+      : localStorage.getItem('aitotype_low_power_mode') === 'true';
+    applyLowPowerMode(lowPowerFromConfig);
+    syncLowPowerToOverlay();
+
     updateInstructionText();
   } catch (e) { }
 
@@ -1801,6 +1837,19 @@ async function init() {
         await syncConfigFromUi();
       } catch (e) {
         console.error('Sync record mode failed', e);
+      }
+    });
+  }
+
+  // GPU 低功耗模式开关：即时生效 + 持久化 + 同步到悬浮条窗口
+  if (el.lowPowerSwitch) {
+    el.lowPowerSwitch.addEventListener('change', async () => {
+      applyLowPowerMode(el.lowPowerSwitch.checked);
+      await syncLowPowerToOverlay();
+      try {
+        await syncConfigFromUi();
+      } catch (e) {
+        console.error('Sync low power mode failed', e);
       }
     });
   }

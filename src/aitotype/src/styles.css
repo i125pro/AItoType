@@ -19,6 +19,11 @@
 
   --mouse-x: 50%;
   --mouse-y: 50%;
+
+  /* --- GPU / Low Power knobs ---
+     光斑模糊半径与漂移时长集中在这里，方便 body.low-power 一键降级。 */
+  --aurora-blur: 80px;
+  --aurora-float-duration: 20s;
 }
 
 body {
@@ -52,10 +57,25 @@ body {
 
 .aurora-beam {
   position: absolute;
-  filter: blur(80px);
+  filter: blur(var(--aurora-blur));
   opacity: 0.4;
   mix-blend-mode: screen;
-  animation: float 20s infinite ease-in-out alternate;
+  animation: float var(--aurora-float-duration) infinite ease-in-out alternate;
+  /* 提升为独立合成层：动画只移动图层，不再逐帧重算模糊 + 全屏混合 */
+  will-change: transform;
+  transform: translateZ(0);
+  backface-visibility: hidden;
+}
+
+/* 低功耗模式（GPU）：去掉逐帧重算的 80px 模糊与无限漂移动画。
+   径向渐变自带 alpha 衰减，静态渐变与模糊柔光肉眼几乎无差别。 */
+body.low-power {
+  --aurora-blur: 0px;
+  --aurora-float-duration: 0s;
+}
+
+body.low-power .aurora-beam {
+  animation: none;
 }
 
 .beam-1 {
@@ -233,6 +253,27 @@ body {
   position: relative;
   /* Levitating animation */
   animation: levitate 6s infinite ease-in-out;
+  /* 悬浮容器同样提升为独立合成层，避免动画带动整棵子树重绘 */
+  will-change: transform;
+  transform: translateZ(0);
+}
+
+/* 低功耗模式：停掉与真实数据无关的装饰性无限动画（主窗口） */
+body.low-power .spatial-core-container,
+body.low-power .orb-internal-light,
+body.low-power .star-field {
+  animation: none !important;
+}
+
+/* 系统级"减少动态效果"兜底 */
+@media (prefers-reduced-motion: reduce) {
+
+  .aurora-beam,
+  .spatial-core-container,
+  .orb-internal-light {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
 }
 
 @keyframes levitate {
