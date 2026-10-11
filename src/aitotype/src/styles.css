@@ -19,22 +19,21 @@
 
   --mouse-x: 50%;
   --mouse-y: 50%;
-
-  /* GPU cost knobs for the aurora beams (overridable by body.low-power) */
-  --beam-blur: 80px;
-  --beam-float-dur: 20s;
 }
 
-/* Low power mode: collapse blur + motion so the GPU can idle. */
-body.low-power {
-  --beam-blur: 0px;
-  --beam-float-dur: 0s;
+/* Low power mode: no always-on animations, so the GPU can fully idle.
+   (The aurora background is already a static baked gradient.) */
+body.low-power .spatial-core-container {
+  animation: none;
+}
+
+body.low-power .spotlight-cursor {
+  display: none;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  :root {
-    --beam-blur: 0px;
-    --beam-float-dur: 0s;
+  .spatial-core-container {
+    animation: none;
   }
 }
 
@@ -50,12 +49,19 @@ body {
   /* VisionOS cursor is usually hidden or eye-gaze, but on Mac we use default */
 }
 
-/* --- Dynamic Background --- */
+/* --- Static Background (pre-baked, no per-frame GPU rendering) --- */
 .spatial-bg {
   position: fixed;
   inset: 0;
   z-index: -2;
-  background: #050505;
+  /* The three aurora glows baked directly into one static paint.
+     radial-gradient already fades softly, so no blur() filter and
+     no mix-blend-mode compositing is needed at runtime. */
+  background:
+    radial-gradient(60% 60% at 20% 20%, rgba(0, 21, 255, 0.35), transparent 70%),
+    radial-gradient(50% 50% at 85% 85%, rgba(255, 0, 85, 0.28), transparent 70%),
+    radial-gradient(40% 40% at 45% 55%, rgba(0, 209, 255, 0.22), transparent 70%),
+    #050505;
 }
 
 .star-field {
@@ -67,50 +73,9 @@ body {
   mask-image: radial-gradient(circle at center, black, transparent 80%);
 }
 
+/* The dynamic beams are disabled — background is now a static gradient. */
 .aurora-beam {
-  position: absolute;
-  filter: blur(var(--beam-blur));
-  opacity: 0.4;
-  mix-blend-mode: screen;
-  animation: float var(--beam-float-dur) infinite ease-in-out alternate;
-  will-change: transform;
-  transform: translateZ(0);
-}
-
-.beam-1 {
-  width: 60%;
-  height: 60%;
-  background: radial-gradient(ellipse at center, #0015ff, transparent 70%);
-  top: -20%;
-  left: -10%;
-}
-
-.beam-2 {
-  width: 50%;
-  height: 50%;
-  background: radial-gradient(ellipse at center, #ff0055, transparent 70%);
-  bottom: -10%;
-  right: -10%;
-  animation-delay: -5s;
-}
-
-.beam-3 {
-  width: 40%;
-  height: 40%;
-  background: radial-gradient(ellipse at center, #00d1ff, transparent 70%);
-  top: 40%;
-  left: 30%;
-  animation-delay: -10s;
-}
-
-@keyframes float {
-  0% {
-    transform: translate(0, 0) scale(1);
-  }
-
-  100% {
-    transform: translate(30px, 20px) scale(1.1);
-  }
+  display: none;
 }
 
 /* --- Spotlight Cursor --- */
