@@ -867,6 +867,27 @@ fn hide_overlay(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// 将主窗口的「GPU 低功耗模式」状态同步到悬浮条窗口（overlay）。
+/// 通过注入一小段 JS 切换 overlay 文档的 body.low-power class，
+/// 由 overlay.css 负责停掉光球/光环的无限动画。
+#[tauri::command]
+fn set_overlay_low_power(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    use tauri::Manager;
+
+    let overlay = app
+        .get_webview_window("overlay")
+        .ok_or_else(|| "overlay window not found".to_string())?;
+
+    let js = if enabled {
+        "document.body && document.body.classList.add('low-power');"
+    } else {
+        "document.body && document.body.classList.remove('low-power');"
+    };
+
+    overlay.eval(js).map_err(|e| format!("sync overlay low power failed: {e}"))?;
+    Ok(())
+}
+
 #[tauri::command]
 fn hide_main_window(app: tauri::AppHandle) -> Result<(), String> {
     use tauri::Manager;
@@ -1057,6 +1078,7 @@ pub fn run() {
             is_shortcut_ready,
             show_overlay_status,
             hide_overlay,
+            set_overlay_low_power,
             check_accessibility_permissions,
             request_accessibility_permissions,
             open_accessibility_settings,
