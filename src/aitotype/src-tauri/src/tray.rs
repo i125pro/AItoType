@@ -1,20 +1,15 @@
 //! 系统托盘
 //!
-//! 基于 `tray-icon`，替代原 Tauri 的 tray-icon 能力。
-//! 菜单事件通过后台线程读取全局 channel 并转发到应用。
+//! 关键设计：托盘菜单事件在**后台线程**直接处理，不依赖 GUI 主循环。
+//! 主窗口隐藏后 eframe 不再触发 `update`，因此「退出」必须在这里直接完成，
+//! 「显示窗口」则通过共享标记 + 请求重绘来唤醒界面。
 #![allow(dead_code)]
 
-use std::sync::mpsc::Sender;
-
+use eframe::egui;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
-/// 托盘向应用发送的指令
-#[derive(Debug, Clone, Copy)]
-pub enum TrayCommand {
-    ShowWindow,
-    Quit,
-}
+use crate::core::SharedState;
 
 /// 从内置 PNG 加载托盘图标
 pub fn load_icon() -> Result<Icon, String> {
@@ -28,7 +23,7 @@ pub fn load_icon() -> Result<Icon, String> {
 }
 
 /// 创建托盘图标。返回的 TrayIcon 必须由调用方持有以维持生命周期。
-pub fn build_tray(tx: Sender<TrayCommand>) -> Result<TrayIcon, String> {
+pub fn build_tray(shared: SharedState, ctx: egui::Context) -> Result<TrayIcon, String> {
     let show_item = MenuItem::new("Show Window", true, None);
     let quit_item = MenuItem::new("Quit AItoType", true, None);
     let show_id = show_item.id().clone();
@@ -50,9 +45,13 @@ pub fn build_tray(tx: Sender<TrayCommand>) -> Result<TrayIcon, String> {
         let receiver = MenuEvent::receiver();
         while let Ok(event) = receiver.recv() {
             if event.id == show_id {
-                let _ = tx.send(TrayCommand::ShowWindow);
+                if let Ok(mut state) = shared.lock() {
+                    state.show_requested = true;
+                }
+                ctx.request_repaint();
             } else if event.id == quit_id {
-                let _ = tx.send(TrayCommand::Quit);
+                // 直接退出进程：不依赖 GUI 主循环，保证「退出」始终可用
+                std::process::exit(0);
             }
         }
     });

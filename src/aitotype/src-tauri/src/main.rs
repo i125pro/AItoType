@@ -7,6 +7,7 @@
 mod app;
 mod audio;
 mod config;
+mod core;
 mod corrections;
 mod fonts;
 mod hotkey;
