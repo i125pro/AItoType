@@ -4,7 +4,9 @@
 //! egui 立即模式界面 + 后台线程消息，彻底移除 Tauri / WebView2。
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -13,27 +15,19 @@ use serde::Deserialize;
 
 use crate::audio;
 use crate::config;
+use crate::core::{self, HistoryItem, RecStatus, SharedState, ToastKind};
 use crate::corrections::{self, CorrectionStore};
 use crate::hotkey::HotkeyService;
 use crate::keyboard;
 use crate::logging;
 use crate::settings::{self, UiSettings};
 use crate::stt::{self, SttConfig};
-use crate::tray::TrayCommand;
 #[cfg(not(target_os = "linux"))]
 use crate::tray;
-
-lazy_static::lazy_static! {
-    static ref RUNTIME: tokio::runtime::Runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("创建 tokio runtime 失败");
-}
 
 const GITHUB_RELEASE_LATEST_API: &str =
     "https://api.github.com/repos/robinshi2010/AItoType/releases/latest";
 const DEFAULT_DEVICE_LABEL: &str = "System Default Input";
-const HISTORY_LIMIT: usize = 20;
 const WAVEFORM_BARS: usize = 28;
 const OVERLAY_WIDTH: f32 = 358.0;
 const OVERLAY_HEIGHT: f32 = 110.0;
@@ -43,29 +37,6 @@ enum Tab {
     Record,
     History,
     Settings,
-}
-
-#[derive(PartialEq, Clone, Copy)]
-enum RecStatus {
-    Idle,
-    Recording,
-    Transcribing,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum ToastKind {
-    Success,
-    Error,
-}
-
-struct HistoryItem {
-    time: String,
-    text: String,
-}
-
-struct TranscribeOutcome {
-    text: String,
-    fallback_reason: Option<String>,
 }
 
 struct ConnectionTestResult {
@@ -84,7 +55,6 @@ struct UpdateInfo {
 }
 
 enum AsyncMsg {
-    Transcribed(Result<TranscribeOutcome, String>),
     Tested(ConnectionTestResult),
     UpdateFound(UpdateInfo),
 }
@@ -199,122 +169,6 @@ async fn run_test_connection(stt_config: SttConfig) -> ConnectionTestResult {
             }
         }
     }
-}
-
-/// 停止录音 -> 转写 -> 纠错 -> 润色 -> 记录日志
-async fn run_transcribe(stt_config: SttConfig) -> Result<TranscribeOutcome, String> {
-    let file_path = audio::stop_recording()?;
-    let config = config::normalize_stt_config(stt_config);
-
-    let transcribe_result = stt::transcribe(&file_path, &config).await;
-
-    // 清理临时录音文件
-    if let Err(e) = std::fs::remove_file(&file_path) {
-        eprintln!("清理临时录音文件失败 {}: {:?}", file_path, e);
-    }
-
-    let raw_text = transcribe_result?;
-    let mut store = corrections::load_corrections();
-
-    let first_pass = corrections::apply_corrections(&raw_text, &store);
-    let corrected_text = first_pass.text.clone();
-    let mut correction_hits = first_pass.hits.clone();
-    let mut store_dirty = corrections::increment_hit_counts(&mut store, &first_pass.hits);
-
-    let mut log_entry = logging::TranscribeLogEntry {
-        timestamp: chrono::Local::now().to_rfc3339(),
-        stt_provider: config.provider.clone(),
-        stt_model: config.model.clone(),
-        stt_text: raw_text.clone(),
-        pre_correction_text: Some(raw_text.clone()),
-        post_correction_text: Some(corrected_text.clone()),
-        correction_hits: if correction_hits.is_empty() {
-            None
-        } else {
-            Some(correction_hits.clone())
-        },
-        enhancement_enabled: config.enhancement_enabled,
-        enhancement_provider: None,
-        enhancement_model: None,
-        enhancement_text: None,
-        enhancement_status: None,
-        enhancement_error: None,
-        enhancement_duration_ms: None,
-        final_text: corrected_text.clone(),
-    };
-
-    if !config.enhancement_enabled {
-        if store_dirty {
-            let _ = corrections::save_corrections(&store);
-        }
-        logging::append_log(log_entry);
-        return Ok(TranscribeOutcome {
-            text: corrected_text,
-            fallback_reason: None,
-        });
-    }
-
-    log_entry.enhancement_provider = Some(config.enhancement_provider.clone());
-    log_entry.enhancement_model = Some(config.enhancement_model.clone());
-
-    let enhancement_started = Instant::now();
-    let enhance_result = tokio::time::timeout(
-        Duration::from_secs(stt::ENHANCEMENT_REQUEST_TIMEOUT_SECS),
-        stt::enhance_text(&corrected_text, &config),
-    )
-    .await;
-
-    let mut fallback_reason: Option<String> = None;
-    let after_enhance = match enhance_result {
-        Ok(Ok(enhanced_text)) => {
-            log_entry.enhancement_text = Some(enhanced_text.clone());
-            log_entry.enhancement_status = Some("success".to_string());
-            log_entry.enhancement_duration_ms = Some(enhancement_started.elapsed().as_millis() as u64);
-            enhanced_text
-        }
-        Ok(Err(err)) => {
-            log_entry.enhancement_status = Some("failed".to_string());
-            log_entry.enhancement_error = Some(err.clone());
-            log_entry.enhancement_duration_ms = Some(enhancement_started.elapsed().as_millis() as u64);
-            fallback_reason = Some(err);
-            corrected_text.clone()
-        }
-        Err(_) => {
-            let reason = format!(
-                "LLM 润色超时（{} 秒）",
-                stt::ENHANCEMENT_REQUEST_TIMEOUT_SECS
-            );
-            log_entry.enhancement_status = Some("timeout".to_string());
-            log_entry.enhancement_error = Some(reason.clone());
-            log_entry.enhancement_duration_ms = Some(enhancement_started.elapsed().as_millis() as u64);
-            fallback_reason = Some(reason);
-            corrected_text.clone()
-        }
-    };
-
-    let second_pass = corrections::apply_corrections(&after_enhance, &store);
-    if !second_pass.hits.is_empty() {
-        correction_hits.extend(second_pass.hits.clone());
-    }
-    store_dirty |= corrections::increment_hit_counts(&mut store, &second_pass.hits);
-
-    log_entry.post_correction_text = Some(second_pass.text.clone());
-    log_entry.correction_hits = if correction_hits.is_empty() {
-        None
-    } else {
-        Some(correction_hits)
-    };
-    log_entry.final_text = second_pass.text.clone();
-
-    if store_dirty {
-        let _ = corrections::save_corrections(&store);
-    }
-
-    logging::append_log(log_entry);
-    Ok(TranscribeOutcome {
-        text: second_pass.text,
-        fallback_reason,
-    })
 }
 
 // ============ 权限（macOS） ============
@@ -480,10 +334,19 @@ fn default_enhancement_model_for_provider(provider: &str) -> &'static str {
 
 pub struct AitoTypeApp {
     tab: Tab,
+
+    // ---- 与后台线程共享的业务状态 ----
+    shared: SharedState,
+    engine_cfg: Arc<Mutex<(SttConfig, UiSettings)>>,
+    focused: Arc<AtomicBool>,
+
+    // ---- GUI 本地镜像（每帧从 shared 同步） ----
     status: RecStatus,
     last_result: String,
     show_result: bool,
     history: VecDeque<HistoryItem>,
+    toast: Option<(String, ToastKind, Instant)>,
+    enhancement_hint: Option<(String, Instant)>,
 
     stt_config: SttConfig,
     ui_settings: UiSettings,
@@ -498,37 +361,23 @@ pub struct AitoTypeApp {
     visual_level: f32,
     device_name: String,
 
-    background_session: bool,
-    hold_started_at: Option<Instant>,
-    last_toggle_at: Option<Instant>,
-
     async_tx: Sender<AsyncMsg>,
     async_rx: Receiver<AsyncMsg>,
-    transcribing: bool,
 
     hotkey: Option<HotkeyService>,
 
-    tray_rx: Receiver<TrayCommand>,
     _tray: Option<tray_icon::TrayIcon>,
     has_tray: bool,
 
     window_visible: bool,
-    quitting: bool,
 
-    overlay_visible: bool,
     overlay_status: RecStatus,
-    overlay_level: f32,
-    overlay_device: String,
-
-    toast: Option<(String, ToastKind, Instant)>,
-    enhancement_hint: Option<(String, Instant)>,
 
     update_info: Option<UpdateInfo>,
     update_dismissed: bool,
 
     accessibility_trusted: bool,
     log_dir: String,
-    error_message: Option<String>,
 
     corr_modal_open: bool,
     corr_modal_wrong: String,
@@ -560,13 +409,66 @@ impl AitoTypeApp {
             }
         }
 
-        let (tray_tx, tray_rx) = channel();
-        let tray = build_tray_if_supported(tray_tx);
+        let shared = core::new_shared();
+        let engine_cfg = Arc::new(Mutex::new((stt_config.clone(), ui_settings.clone())));
+        let focused = Arc::new(AtomicBool::new(true));
+
+        // 全局快捷键后台线程：不依赖 GUI 主循环。
+        // 这样主窗口隐藏（无重绘、update 不再被调用）时，快捷键依然可用。
+        {
+            let shared = shared.clone();
+            let engine_cfg = engine_cfg.clone();
+            let focused = focused.clone();
+            let ctx = cc.egui_ctx.clone();
+            std::thread::spawn(move || {
+                let receiver = GlobalHotKeyEvent::receiver();
+                while let Ok(event) = receiver.recv() {
+                    let (cfg, ui) = {
+                        let guard = engine_cfg.lock().unwrap();
+                        (guard.0.clone(), guard.1.clone())
+                    };
+                    let background = !focused.load(Ordering::Relaxed);
+                    match event.state {
+                        HotKeyState::Pressed => {
+                            if cfg.record_mode == "hold" {
+                                core::start_recording(&shared, background);
+                            } else {
+                                let now = Instant::now();
+                                let skip = match shared.lock() {
+                                    Ok(state) => match state.last_toggle_at {
+                                        Some(last) => {
+                                            now.duration_since(last) < Duration::from_millis(450)
+                                        }
+                                        None => false,
+                                    },
+                                    Err(_) => false,
+                                };
+                                if !skip {
+                                    if let Ok(mut state) = shared.lock() {
+                                        state.last_toggle_at = Some(now);
+                                    }
+                                    core::toggle(&shared, &cfg, &ui, background);
+                                }
+                            }
+                        }
+                        HotKeyState::Released => {
+                            if cfg.record_mode == "hold" {
+                                core::release_hold(&shared, &cfg, &ui);
+                            }
+                        }
+                    }
+                    // 窗口可见时刷新界面（隐藏时该调用可能无效，但不影响功能）
+                    ctx.request_repaint();
+                }
+            });
+        }
+
+        let tray = build_tray_if_supported(shared.clone(), cc.egui_ctx.clone());
         let has_tray = tray.is_some();
 
         let (async_tx, async_rx) = channel::<AsyncMsg>();
         let update_tx = async_tx.clone();
-        RUNTIME.spawn(async move {
+        core::RUNTIME.spawn(async move {
             if let Some(info) = fetch_update().await {
                 let _ = update_tx.send(AsyncMsg::UpdateFound(info));
             }
@@ -576,10 +478,17 @@ impl AitoTypeApp {
 
         Self {
             tab: Tab::Record,
+
+            shared,
+            engine_cfg,
+            focused,
+
             status: RecStatus::Idle,
             last_result: String::new(),
             show_result: false,
             history: VecDeque::new(),
+            toast: None,
+            enhancement_hint: None,
 
             stt_config,
             ui_settings,
@@ -594,37 +503,23 @@ impl AitoTypeApp {
             visual_level: 0.0,
             device_name: String::new(),
 
-            background_session: false,
-            hold_started_at: None,
-            last_toggle_at: None,
-
             async_tx,
             async_rx,
-            transcribing: false,
 
             hotkey,
 
-            tray_rx,
             _tray: tray,
             has_tray,
 
             window_visible: true,
-            quitting: false,
 
-            overlay_visible: false,
             overlay_status: RecStatus::Recording,
-            overlay_level: 0.0,
-            overlay_device: String::new(),
-
-            toast: None,
-            enhancement_hint: None,
 
             update_info: None,
             update_dismissed: false,
 
             accessibility_trusted: check_accessibility_permissions(),
             log_dir,
-            error_message: None,
 
             corr_modal_open: false,
             corr_modal_wrong: String::new(),
@@ -636,55 +531,33 @@ impl AitoTypeApp {
 
     fn handle_close_request(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.viewport().close_requested()) {
-            if self.quitting || !self.has_tray {
+            // 有托盘：隐藏到托盘；无托盘（如 Linux）：直接退出
+            if !self.has_tray {
                 return;
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             self.window_visible = false;
+            self.focused.store(false, Ordering::Relaxed);
         }
     }
 
-    fn poll_tray(&mut self, ctx: &egui::Context) {
-        while let Ok(cmd) = self.tray_rx.try_recv() {
-            match cmd {
-                TrayCommand::ShowWindow => {
-                    self.window_visible = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                }
-                TrayCommand::Quit => {
-                    self.quitting = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    fn handle_show_request(&mut self, ctx: &egui::Context) {
+        let requested = match self.shared.lock() {
+            Ok(mut state) => {
+                if state.show_requested {
+                    state.show_requested = false;
+                    true
+                } else {
+                    false
                 }
             }
-        }
-    }
-
-    fn poll_hotkey(&mut self, ctx: &egui::Context) {
-        while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-            let background = !ctx.input(|i| i.focused);
-            match event.state {
-                HotKeyState::Pressed => {
-                    if self.stt_config.record_mode == "hold" {
-                        self.start_recording(background);
-                    } else {
-                        let now = Instant::now();
-                        if let Some(last) = self.last_toggle_at {
-                            if now.duration_since(last) < Duration::from_millis(450) {
-                                continue;
-                            }
-                        }
-                        self.last_toggle_at = Some(now);
-                        self.toggle_recording(background);
-                    }
-                }
-                HotKeyState::Released => {
-                    if self.stt_config.record_mode == "hold" {
-                        self.release_hold();
-                    }
-                }
-            }
+            Err(_) => false,
+        };
+        if requested {
+            self.window_visible = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
     }
 
@@ -696,40 +569,6 @@ impl AitoTypeApp {
 
         for msg in messages {
             match msg {
-                AsyncMsg::Transcribed(result) => {
-                    self.transcribing = false;
-                    self.status = RecStatus::Idle;
-                    match result {
-                        Ok(outcome) => {
-                            self.last_result = outcome.text.clone();
-                            self.show_result = true;
-                            self.push_history(outcome.text.clone());
-
-                            if self.ui_settings.auto_copy {
-                                let _ = keyboard::copy_to_clipboard(&outcome.text);
-                            }
-
-                            if self.background_session || self.stt_config.auto_write {
-                                if let Err(err) = keyboard::paste_text(&outcome.text) {
-                                    self.set_toast(
-                                        format!("自动写入失败：{}", err),
-                                        ToastKind::Error,
-                                    );
-                                }
-                            }
-
-                            if let Some(reason) = outcome.fallback_reason {
-                                self.show_enhancement_hint(reason);
-                            }
-                        }
-                        Err(err) => {
-                            self.set_toast(format!("转写失败：{}", err), ToastKind::Error);
-                            self.error_message = Some(err);
-                        }
-                    }
-                    self.background_session = false;
-                    self.overlay_visible = false;
-                }
                 AsyncMsg::Tested(result) => {
                     self.form.testing = false;
                     let details = format!(
@@ -776,126 +615,72 @@ impl AitoTypeApp {
         }
         self.waveform_idx = (idx + 1) % self.waveform.len();
 
-        self.overlay_level = self.visual_level;
         if self.device_name.is_empty() {
             self.device_name = audio::get_input_device_name();
         }
     }
 
-    // ---------- 录音流程 ----------
+    // ---------- 录音流程（委托给 core，可在后台线程安全调用） ----------
 
-    fn toggle_recording(&mut self, background: bool) {
-        match self.status {
-            RecStatus::Recording => self.stop_and_transcribe(),
-            RecStatus::Transcribing => {}
-            RecStatus::Idle => self.start_recording(background),
-        }
-    }
-
-    fn start_recording(&mut self, background: bool) {
-        if matches!(self.status, RecStatus::Recording | RecStatus::Transcribing) {
-            return;
-        }
-        self.show_result = false;
-        self.device_name.clear();
-        self.visual_level = 0.0;
-        self.waveform.iter_mut().for_each(|v| *v = 0.0);
-
-        match audio::start_recording() {
-            Ok(()) => {
-                self.status = RecStatus::Recording;
-                self.background_session = background;
-                self.hold_started_at = Some(Instant::now());
-                if background {
-                    self.overlay_visible = true;
-                    self.overlay_status = RecStatus::Recording;
-                    self.overlay_device = audio::get_input_device_name();
-                }
-            }
-            Err(err) => {
-                self.set_toast(format!("开始录音失败：{}", err), ToastKind::Error);
-                self.background_session = false;
-            }
-        }
-    }
-
-    fn release_hold(&mut self) {
-        if self.status != RecStatus::Recording {
-            return;
-        }
-        let elapsed = self
-            .hold_started_at
-            .map(|t| t.elapsed())
-            .unwrap_or_default();
-        if elapsed < Duration::from_millis(200) {
-            let _ = audio::stop_recording();
-            self.status = RecStatus::Idle;
-            self.background_session = false;
-            self.overlay_visible = false;
-        } else {
-            self.stop_and_transcribe();
-        }
-    }
-
-    fn stop_and_transcribe(&mut self) {
-        if self.status != RecStatus::Recording {
-            return;
-        }
-
-        self.status = RecStatus::Transcribing;
-        self.transcribing = true;
-        if self.background_session {
-            self.overlay_status = RecStatus::Transcribing;
-            self.overlay_visible = true;
-        }
-
-        let config = self.stt_config.clone();
-        let tx = self.async_tx.clone();
-        RUNTIME.spawn(async move {
-            let _ = tx.send(AsyncMsg::Transcribed(run_transcribe(config).await));
-        });
-    }
-
-    fn push_history(&mut self, text: String) {
-        let time = chrono::Local::now().format("%H:%M").to_string();
-        self.history.push_front(HistoryItem { time, text });
-        while self.history.len() > HISTORY_LIMIT {
-            self.history.pop_back();
-        }
+    fn toggle_recording(&self, background: bool) {
+        let cfg = self.stt_config.clone();
+        let ui = self.ui_settings.clone();
+        core::toggle(&self.shared, &cfg, &ui, background);
     }
 
     // ---------- 提示 ----------
 
-    fn set_toast(&mut self, text: String, kind: ToastKind) {
-        self.toast = Some((text, kind, Instant::now()));
+    fn set_toast(&self, text: String, kind: ToastKind) {
+        core::set_toast(&self.shared, text, kind);
     }
 
-    fn show_enhancement_hint(&mut self, reason: String) {
-        let detail = reason.trim();
-        let truncated = if detail.chars().count() > 120 {
-            let prefix: String = detail.chars().take(120).collect();
-            format!("{}...", prefix)
-        } else {
-            detail.to_string()
-        };
-        let text = if truncated.is_empty() {
-            "LLM 润色失败，已回退原始转写".to_string()
-        } else {
-            format!("LLM 润色失败，已回退原始转写：{}", truncated)
-        };
-        self.enhancement_hint = Some((text, Instant::now()));
+    fn show_enhancement_hint(&self, reason: String) {
+        core::show_enhancement_hint(&self.shared, reason);
     }
 
-    fn expire_toasts(&mut self) {
-        if let Some((_, _, at)) = &self.toast {
-            if at.elapsed() > Duration::from_secs(3) {
-                self.toast = None;
-            }
+    fn expire_toasts(&self) {
+        core::expire_toasts(&self.shared);
+    }
+
+    // ---------- 与共享状态同步 ----------
+
+    fn sync_from_shared(&mut self) {
+        if let Ok(state) = self.shared.lock() {
+            self.status = state.status;
+            self.last_result = state.last_result.clone();
+            self.show_result = state.show_result;
+            self.history = state.history.clone();
+            self.toast = state.toast.clone();
+            self.enhancement_hint = state.enhancement_hint.clone();
+            self.overlay_status = state.status;
         }
-        if let Some((_, at)) = &self.enhancement_hint {
-            if at.elapsed() > Duration::from_secs(5) {
-                self.enhancement_hint = None;
+    }
+
+    fn sync_engine_cfg(&self) {
+        if let Ok(mut guard) = self.engine_cfg.lock() {
+            *guard = (self.stt_config.clone(), self.ui_settings.clone());
+        }
+    }
+
+    fn overlay_visible(&self) -> bool {
+        match self.shared.lock() {
+            Ok(state) => {
+                state.background_session
+                    && matches!(state.status, RecStatus::Recording | RecStatus::Transcribing)
             }
+            Err(_) => false,
+        }
+    }
+
+    fn set_shared_result(&self, text: String) {
+        if let Ok(mut state) = self.shared.lock() {
+            state.last_result = text;
+        }
+    }
+
+    fn set_shared_show_result(&self, show: bool) {
+        if let Ok(mut state) = self.shared.lock() {
+            state.show_result = show;
         }
     }
 
@@ -968,6 +753,8 @@ impl AitoTypeApp {
             }
             self.accessibility_trusted = check_accessibility_permissions();
         }
+
+        self.sync_engine_cfg();
     }
 
     // ---------- 快捷键录制 ----------
@@ -1175,6 +962,7 @@ impl AitoTypeApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("关闭").clicked() {
                             self.show_result = false;
+                            self.set_shared_show_result(false);
                         }
                         if ui.button("纠错").clicked() {
                             self.corr_modal_open = true;
@@ -1614,6 +1402,7 @@ impl AitoTypeApp {
         if !self.last_result.is_empty() {
             let preview = corrections::apply_corrections(&self.last_result, &self.corrections);
             self.last_result = preview.text;
+            self.set_shared_result(self.last_result.clone());
             if self.ui_settings.auto_copy {
                 let _ = keyboard::copy_to_clipboard(&self.last_result);
             }
@@ -1642,7 +1431,7 @@ impl AitoTypeApp {
         self.form.testing = true;
         self.form.test_result = None;
         let tx = self.async_tx.clone();
-        RUNTIME.spawn(async move {
+        core::RUNTIME.spawn(async move {
             let _ = tx.send(AsyncMsg::Tested(run_test_connection(config).await));
         });
     }
@@ -1662,8 +1451,12 @@ impl AitoTypeApp {
             .with_active(false);
 
         let status = self.overlay_status;
-        let level = self.overlay_level;
-        let device = self.overlay_device.clone();
+        let level = if status == RecStatus::Recording {
+            self.visual_level
+        } else {
+            0.0
+        };
+        let device = audio::get_input_device_name();
 
         ctx.show_viewport_deferred(viewport_id, builder, move |ctx, _class| {
             egui::CentralPanel::default()
@@ -1710,9 +1503,11 @@ impl AitoTypeApp {
 
 impl eframe::App for AitoTypeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.sync_from_shared();
+        self.sync_engine_cfg();
+
+        self.handle_show_request(ctx);
         self.handle_close_request(ctx);
-        self.poll_tray(ctx);
-        self.poll_hotkey(ctx);
         self.poll_async();
         self.poll_recording();
         if self.form.capturing {
@@ -1723,10 +1518,12 @@ impl eframe::App for AitoTypeApp {
         if self.window_visible {
             self.ui_main(ctx);
         }
-        if self.overlay_visible {
+        if self.overlay_visible() {
             self.ui_overlay(ctx);
         }
 
+        self.focused
+            .store(ctx.input(|i| i.focused), Ordering::Relaxed);
         ctx.request_repaint_after(Duration::from_millis(100));
     }
 }
@@ -1734,14 +1531,17 @@ impl eframe::App for AitoTypeApp {
 // ============ 辅助函数 ============
 
 #[cfg(target_os = "linux")]
-fn build_tray_if_supported(_tx: Sender<TrayCommand>) -> Option<tray_icon::TrayIcon> {
+fn build_tray_if_supported(
+    _shared: SharedState,
+    _ctx: egui::Context,
+) -> Option<tray_icon::TrayIcon> {
     eprintln!("Linux: 系统托盘暂不启用（需要 GTK 主循环），因此关闭窗口将直接退出程序。");
     None
 }
 
 #[cfg(not(target_os = "linux"))]
-fn build_tray_if_supported(tx: Sender<TrayCommand>) -> Option<tray_icon::TrayIcon> {
-    tray::build_tray(tx).ok()
+fn build_tray_if_supported(shared: SharedState, ctx: egui::Context) -> Option<tray_icon::TrayIcon> {
+    tray::build_tray(shared, ctx).ok()
 }
 
 fn format_provider_name(provider: &str) -> &'static str {
