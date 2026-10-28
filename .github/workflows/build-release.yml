@@ -32,30 +32,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: "npm"
-          cache-dependency-path: src/aitotype/package-lock.json
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             pkg-config \
-            libwebkit2gtk-4.1-dev \
             libgtk-3-dev \
-            libayatana-appindicator3-dev \
             libx11-dev \
             libxdo-dev \
             libasound2-dev \
-            librsvg2-dev \
-            patchelf
+            libayatana-appindicator3-dev \
+            libssl-dev \
+            libxkbcommon-dev
 
       - name: Verify ALSA pkg-config path
         if: runner.os == 'Linux'
@@ -63,14 +52,18 @@ jobs:
           echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig" >> $GITHUB_ENV
           pkg-config --modversion alsa
 
-      - name: Install frontend dependencies
-        working-directory: src/aitotype
-        run: npm ci
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/aitotype/src-tauri
 
       - name: Sync app version from tag
-        if: "startsWith(github.ref, 'refs/tags/v')"
-        working-directory: src/aitotype
+        if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
+        working-directory: src/aitotype/src-tauri
         env:
           TAG_VERSION: ${{ github.ref_name }}
         run: |
@@ -78,51 +71,20 @@ jobs:
           VERSION="${TAG_VERSION#v}"
           export VERSION
           echo "Syncing app version to ${VERSION}"
-          node -e '
-            const fs = require("fs");
-            const version = process.env.VERSION;
-            const tauriPath = "src-tauri/tauri.conf.json";
-            const cargoPath = "src-tauri/Cargo.toml";
+          node -e 'const fs = require("fs"); const p = "Cargo.toml"; let s = fs.readFileSync(p, "utf8"); s = s.replace(/(\[package\][\s\S]*?\nversion\s*=\s*)"[^"]+"/, (m, a) => a + "\"" + process.env.VERSION + "\""); fs.writeFileSync(p, s);'
 
-            const tauri = JSON.parse(fs.readFileSync(tauriPath, "utf8"));
-            tauri.version = version;
-            fs.writeFileSync(tauriPath, JSON.stringify(tauri, null, 2) + "\n");
+      - name: Build (release)
+        working-directory: src/aitotype/src-tauri
+        run: cargo build --release
 
-            const cargo = fs.readFileSync(cargoPath, "utf8");
-            const eol = cargo.includes("\r\n") ? "\r\n" : "\n";
-            const lines = cargo.split(/\r?\n/);
-            const versionIdx = lines.findIndex((line) => /^\s*version\s*=\s*"[^"]+"/.test(line));
-            if (versionIdx === -1) {
-              throw new Error("Failed to locate version key in Cargo.toml");
-            }
-            lines[versionIdx] = `version = "${version}"`;
-            fs.writeFileSync(cargoPath, lines.join(eol));
-          '
-
-      - name: Quick compile (no bundle)
-        if: "!startsWith(github.ref, 'refs/tags/v')"
-        working-directory: src/aitotype
-        run: npx tauri build --ci --no-bundle
-
-      - name: Build app bundle (tag release)
-        if: "startsWith(github.ref, 'refs/tags/v')"
-        working-directory: src/aitotype
-        run: npm run build:ci
-
-      - name: Upload bundles artifact
-        if: "startsWith(github.ref, 'refs/tags/v')"
+      - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
-          name: bundles-${{ matrix.os }}
-          if-no-files-found: warn
+          name: aitotype-${{ matrix.os }}
+          if-no-files-found: ignore
           path: |
-            src/aitotype/src-tauri/target/release/bundle/**/*.dmg
-            src/aitotype/src-tauri/target/release/bundle/**/*.app.tar.gz
-            src/aitotype/src-tauri/target/release/bundle/**/*.msi
-            src/aitotype/src-tauri/target/release/bundle/**/*.exe
-            src/aitotype/src-tauri/target/release/bundle/**/*.deb
-            src/aitotype/src-tauri/target/release/bundle/**/*.AppImage
-            src/aitotype/src-tauri/target/release/bundle/**/*.rpm
+            src/aitotype/src-tauri/target/release/aitotype
+            src/aitotype/src-tauri/target/release/aitotype.exe
 
   release:
     name: Publish GitHub Release
@@ -131,14 +93,15 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
 
     steps:
-      - name: Download all build artifacts
+      - name: Download Windows artifact
         uses: actions/download-artifact@v4
         with:
+          name: aitotype-windows-latest
           path: dist
-          merge-multiple: true
 
-      - name: Create Release and upload assets
+      - name: Create Release and upload Windows assets
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: dist/**/*
+          files: |
+            dist/**/*.exe

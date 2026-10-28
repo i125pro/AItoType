@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-pub const CORRECTIONS_FILENAME: &str = "corrections.json";
+use crate::paths;
+
 pub const CORRECTIONS_VERSION: u32 = 1;
 pub const MAX_ENTRIES: usize = 500;
 pub const MAX_VARIANTS_PER_ENTRY: usize = 50;
@@ -135,20 +136,12 @@ fn backup_invalid_store(path: &Path, original_content: &str) {
     let _ = std::fs::write(&backup_path, original_content);
 }
 
-pub fn corrections_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    use tauri::Manager;
-    let dir = app
-        .path()
-        .app_config_dir()
-        .map_err(|e| format!("获取配置目录失败: {:?}", e))?;
-    Ok(dir.join(CORRECTIONS_FILENAME))
+pub fn corrections_path() -> PathBuf {
+    paths::corrections_file()
 }
 
-pub fn load_corrections(app: &tauri::AppHandle) -> CorrectionStore {
-    let path = match corrections_path(app) {
-        Ok(path) => path,
-        Err(_) => return CorrectionStore::default(),
-    };
+pub fn load_corrections() -> CorrectionStore {
+    let path = corrections_path();
 
     if !path.exists() {
         return CorrectionStore::default();
@@ -169,11 +162,9 @@ pub fn load_corrections(app: &tauri::AppHandle) -> CorrectionStore {
     }
 }
 
-pub fn save_corrections(app: &tauri::AppHandle, store: &CorrectionStore) -> Result<(), String> {
-    let path = corrections_path(app)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {:?}", e))?;
-    }
+pub fn save_corrections(store: &CorrectionStore) -> Result<(), String> {
+    let path = corrections_path();
+    paths::ensure_parent(&path)?;
 
     let sanitized = sanitize_store(store.clone());
     let json =
