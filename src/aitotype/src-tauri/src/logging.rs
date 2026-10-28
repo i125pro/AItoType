@@ -1,8 +1,10 @@
 //! 转写日志模块
 //!
 //! 记录每次转写与润色结果，按天写入 JSON 文件。
+//! 已去除 Tauri 依赖，目录来自 `paths` 模块。
 
 use crate::corrections::CorrectionHit;
+use crate::paths;
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -37,33 +39,22 @@ pub struct TranscribeLogEntry {
     pub final_text: String,
 }
 
-/// 获取日志目录
-fn log_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    use tauri::Manager;
-
-    app.path()
-        .app_log_dir()
-        .map_err(|e| format!("获取日志目录失败: {:?}", e))
+/// 日志目录
+fn log_dir() -> PathBuf {
+    paths::app_log_dir()
 }
 
-/// 获取今日日志文件路径
-fn today_log_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    let dir = log_dir(app)?;
+/// 今日日志文件路径
+fn today_log_path() -> PathBuf {
     let today = Local::now().format("%Y-%m-%d").to_string();
-    Ok(dir.join(format!("transcribe_{}.json", today)))
+    log_dir().join(format!("transcribe_{}.json", today))
 }
 
 /// 追加一条日志
 ///
 /// 读取现有 JSON 数组后追加写回；失败不影响主流程。
-pub fn append_log(app: &tauri::AppHandle, entry: TranscribeLogEntry) {
-    let path = match today_log_path(app) {
-        Ok(path) => path,
-        Err(e) => {
-            eprintln!("append_log: {}", e);
-            return;
-        }
-    };
+pub fn append_log(entry: TranscribeLogEntry) {
+    let path = today_log_path();
 
     if let Some(parent) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
@@ -90,14 +81,14 @@ pub fn append_log(app: &tauri::AppHandle, entry: TranscribeLogEntry) {
     }
 }
 
-/// 获取日志目录（给前端展示）
-pub fn get_log_dir_path(app: &tauri::AppHandle) -> Result<String, String> {
-    log_dir(app).map(|path| path.to_string_lossy().to_string())
+/// 获取日志目录（给界面展示）
+pub fn get_log_dir_path() -> String {
+    log_dir().to_string_lossy().to_string()
 }
 
 /// 使用系统文件管理器打开日志目录
-pub fn open_log_dir(app: &tauri::AppHandle) -> Result<(), String> {
-    let dir = log_dir(app)?;
+pub fn open_log_dir() -> Result<(), String> {
+    let dir = log_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建日志目录失败: {:?}", e))?;
 
     #[cfg(target_os = "macos")]
