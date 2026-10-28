@@ -334,6 +334,7 @@ fn default_enhancement_model_for_provider(provider: &str) -> &'static str {
 
 pub struct AitoTypeApp {
     tab: Tab,
+    egui_ctx: egui::Context,
 
     // ---- 与后台线程共享的业务状态 ----
     shared: SharedState,
@@ -468,9 +469,11 @@ impl AitoTypeApp {
 
         let (async_tx, async_rx) = channel::<AsyncMsg>();
         let update_tx = async_tx.clone();
+        let update_ctx = cc.egui_ctx.clone();
         core::RUNTIME.spawn(async move {
             if let Some(info) = fetch_update().await {
                 let _ = update_tx.send(AsyncMsg::UpdateFound(info));
+                update_ctx.request_repaint();
             }
         });
 
@@ -478,6 +481,7 @@ impl AitoTypeApp {
 
         Self {
             tab: Tab::Record,
+            egui_ctx: cc.egui_ctx.clone(),
 
             shared,
             engine_cfg,
@@ -1431,8 +1435,10 @@ impl AitoTypeApp {
         self.form.testing = true;
         self.form.test_result = None;
         let tx = self.async_tx.clone();
+        let ctx = self.egui_ctx.clone();
         core::RUNTIME.spawn(async move {
             let _ = tx.send(AsyncMsg::Tested(run_test_connection(config).await));
+            ctx.request_repaint();
         });
     }
 
@@ -1524,7 +1530,21 @@ impl eframe::App for AitoTypeApp {
 
         self.focused
             .store(ctx.input(|i| i.focused), Ordering::Relaxed);
-        ctx.request_repaint_after(Duration::from_millis(100));
+
+        // 按需重绘：空闲时不再定时刷新，避免 GUI 持续重绘导致 CPU 占用过高
+        match self.status {
+            RecStatus::Recording => {
+                ctx.request_repaint_after(Duration::from_millis(60));
+            }
+            RecStatus::Transcribing => {
+                ctx.request_repaint_after(Duration::from_millis(200));
+            }
+            RecStatus::Idle => {
+                if self.toast.is_some() || self.enhancement_hint.is_some() {
+                    ctx.request_repaint_after(Duration::from_millis(250));
+                }
+            }
+        }
     }
 }
 
